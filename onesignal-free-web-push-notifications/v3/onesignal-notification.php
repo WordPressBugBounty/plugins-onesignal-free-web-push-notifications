@@ -36,9 +36,11 @@ function onesignal_create_notification($post, $notification_options = array())
 
     $url = get_permalink($post->ID);
     if (!empty($config_utm_additional_url_params)) {
-      // validate and encode the URL parameters
-      $params = urlencode($config_utm_additional_url_params);
-      $url = $url . (strpos($url, '?') === false ? '?' : '&') . $params;
+      $utm_params = onesignal_parse_utm_parameters($config_utm_additional_url_params);
+      if (!empty($utm_params)) {
+        $separator = (strpos($url, '?') === false) ? '?' : '&';
+        $url = $url . $separator . $utm_params;
+      }
     }
 
     $apiKeyType = onesignal_get_api_key_type();
@@ -51,6 +53,7 @@ function onesignal_create_notification($post, $notification_options = array())
             'Authorization' => $authorizationHeader,
             'accept' => 'application/json',
             'content-type' => 'application/json',
+            'SDK-Wrapper' => onesignal_get_sdk_wrapper_header(),
         ),
         'body' => json_encode(array(
             'app_id' => get_option('OneSignalWPSetting')['app_id'],
@@ -101,6 +104,10 @@ function onesignal_create_notification($post, $notification_options = array())
         $fields['firefox_icon'] =  $thumbnail_size_url;
         $fields['chrome_web_icon'] =  $thumbnail_size_url;
         $fields['chrome_web_image'] = $large_size_url;
+        $fields['big_picture'] = $large_size_url;
+        $fields['ios_attachments'] = [
+            'id' => $large_size_url
+        ];
     }
 
     // Include any fields from onesignal_send_notification filter
@@ -133,7 +140,7 @@ function onesignal_schedule_notification($new_status, $old_status, $post)
     if (($new_status === 'publish') || ($new_status === 'future')) {
         // check if update is on.
         $update = !empty($_POST['os_update']) ? $_POST['os_update'] : $post->os_update;
-        
+
         // do not send notification if not enabled
         if (empty($update)) {
             return;
@@ -155,6 +162,11 @@ function onesignal_schedule_notification($new_status, $old_status, $post)
 // Function to handle quick-edit publish date changes
 function onesignal_handle_quick_edit_date_change($post_id, $post, $update)
 {
+    // Check user capability to edit this post
+    if (!current_user_can('edit_post', $post_id)) {
+        return;
+    }
+
     // Check if this is an autosave, revision, or not an update
     if (wp_is_post_autosave($post_id) || wp_is_post_revision($post_id) || !$update) {
         return;
@@ -194,6 +206,26 @@ function onesignal_handle_quick_edit_date_change($post_id, $post, $update)
 
         // Update the stored publish date
         update_post_meta($post_id, 'os_previous_publish_date', $current_publish_date);
+
+        // Honor the "Send notification when post is published" preference.
+        $should_send = false;
+
+        // Check POST data with nonce verification
+        if (!empty($_POST) && isset($_POST['onesignal_v3_metabox_nonce'])) {
+            if (wp_verify_nonce($_POST['onesignal_v3_metabox_nonce'], 'onesignal_v3_metabox_save')) {
+                $should_send = !empty($_POST['os_update']);
+            }
+        }
+
+        // Fallback to saved metadata if no POST data or failed nonce
+        if (!$should_send) {
+            $os_meta = get_post_meta($post_id, 'os_meta', true);
+            $should_send = !empty($os_meta['os_update']);
+        }
+
+        if (!$should_send) {
+            return;
+        }
 
         // Create a new notification with default options (no custom title/content from metabox)
         // This will use the post title and default settings
